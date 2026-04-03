@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polycode"
+version = "0.1.0"
+description = "A Claude Code-style coding agent that works with any LLM"
+requires-python = ">=3.11"
+dependencies = [
+    # LLM providers
+    "anthropic>=0.49.0",
+    "openai>=1.70.0",
+    "google-genai>=1.9.0",
+    # CLI / UX
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.0",
+    # Tools
+    "duckduckgo-search>=7.0.0",
+    "docker>=7.0.0",
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+polycode = "polycode.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["polycode*"]
