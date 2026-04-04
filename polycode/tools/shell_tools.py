@@ -1,19 +1,16 @@
 """
 Shell tool — runs commands in an isolated Docker container.
 
-Isolation approach:
-  - Uses the official python:3.12-slim image (small, has bash)
-  - Mounts the working directory as READ-ONLY at /workspace inside the container
-  - Mounts a temp output dir READ-WRITE at /output so commands can write files back
-  - Network is DISABLED (--network none) unless explicitly enabled
-  - Container is auto-removed after each run
-  - Hard timeout: 60 seconds
-
-If Docker is not available, the tool reports this and refuses to run.
+Isolation:
+  - Uses python:3.12-slim image
+  - Mounts working directory READ-ONLY at /workspace
+  - Network disabled (--network none)
+  - Container auto-removed after each run
+  - Hard timeout via threading
 """
 
-import os
-import tempfile
+import threading
+import queue
 from pathlib import Path
 
 from polycode.providers.base import ToolDefinition
@@ -48,7 +45,6 @@ class ShellTool(BaseTool):
             description=(
                 "Run a shell command in a secure, isolated Docker container. "
                 "The working directory is mounted read-only at /workspace. "
-                "Write outputs to /output if you need files back. "
                 "Network access is disabled. Timeout: 60 seconds. "
                 "Use for running tests, linters, compilers, or inspecting output."
             ),
@@ -62,12 +58,39 @@ class ShellTool(BaseTool):
                     "install": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional list of pip packages to install before running the command.",
+                        "description": "Optional pip packages to install before running.",
                     },
                 },
                 "required": ["command"],
             },
         )
+
+    def _run_container(self, client, command: str, install: list[str] | None) -> str:
+        """Run container and return output. Raises on failure."""
+        # Build script
+        script_parts = ["cd /workspace"]
+        if install:
+            pkgs = " ".join(install)
+            script_parts.append(f"pip install --quiet {pkgs}")
+        script_parts.append(command)
+        full_script = " && ".join(script_parts)
+
+        # Convert Windows path to Docker-compatible format
+        cwd_str = str(self.cwd.resolve())
+
+        output = client.containers.run(
+            image=DOCKER_IMAGE,
+            command=["bash", "-c", full_script],
+            volumes={
+                cwd_str: {"bind": "/workspace", "mode": "ro"},
+            },
+            network_mode="none" if not self.allow_network else "bridge",
+            remove=True,
+            stdout=True,
+            stderr=True,
+            mem_limit="512m",
+        )
+        return output.decode("utf-8", errors="replace")
 
     def run(self, command: str, install: list[str] | None = None) -> ToolResult:
         if not self._docker_available:
@@ -75,57 +98,47 @@ class ShellTool(BaseTool):
                 success=False,
                 output="",
                 error=(
-                    "Docker is not available on this machine. "
-                    "Install Docker and ensure the daemon is running to use the shell tool."
+                    "Docker is not available. "
+                    "Make sure Docker Desktop is running and try again."
                 ),
             )
 
         try:
             import docker
-
             client = docker.from_env()
 
-            with tempfile.TemporaryDirectory() as tmpdir:
-                output_dir = Path(tmpdir)
+            # Pull image if not present (only downloads once, cached after)
+            try:
+                client.images.get(DOCKER_IMAGE)
+            except docker.errors.ImageNotFound:
+                client.images.pull(DOCKER_IMAGE)
 
-                # Build the full command
-                parts = ["bash", "-c"]
-                script_parts = ["cd /workspace"]
-                if install:
-                    pkgs = " ".join(install)
-                    script_parts.append(f"pip install --quiet {pkgs}")
-                script_parts.append(command)
-                full_script = " && ".join(script_parts)
-                parts.append(full_script)
+            # Run in a thread so we can enforce timeout ourselves
+            result_queue: queue.Queue = queue.Queue()
 
-                container_result = client.containers.run(
-                    image=DOCKER_IMAGE,
-                    command=parts,
-                    volumes={
-                        str(self.cwd.resolve()): {"bind": "/workspace", "mode": "ro"},
-                        str(output_dir.resolve()): {"bind": "/output", "mode": "rw"},
-                    },
-                    network_mode="none" if not self.allow_network else "bridge",
-                    remove=True,
-                    stdout=True,
-                    stderr=True,
-                    mem_limit="512m",
-                    cpu_period=100000,
-                    cpu_quota=50000,  # 0.5 CPUs
-                    timeout=self.timeout,
+            def target():
+                try:
+                    out = self._run_container(client, command, install)
+                    result_queue.put(("ok", out))
+                except Exception as e:
+                    result_queue.put(("err", str(e)))
+
+            t = threading.Thread(target=target, daemon=True)
+            t.start()
+            t.join(timeout=self.timeout)
+
+            if t.is_alive():
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"Command timed out after {self.timeout}s",
                 )
 
-                output = container_result.decode("utf-8", errors="replace")
-
-                # Check if anything was written to /output
-                output_files = list(output_dir.iterdir())
-                if output_files:
-                    output += f"\n\n[Files written to /output: {[f.name for f in output_files]}]"
-
-                return ToolResult(success=True, output=output or "(no output)")
+            status, value = result_queue.get()
+            if status == "ok":
+                return ToolResult(success=True, output=value or "(no output)")
+            else:
+                return ToolResult(success=False, output="", error=value)
 
         except Exception as e:
-            err = str(e)
-            if "timeout" in err.lower():
-                return ToolResult(success=False, output="", error=f"Command timed out after {self.timeout}s")
-            return ToolResult(success=False, output="", error=err)
+            return ToolResult(success=False, output="", error=str(e))
