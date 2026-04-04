@@ -16,6 +16,7 @@ from typing import Callable, Iterator
 
 from polycode.providers.base import BaseProvider, Message, ToolDefinition
 from polycode.tools.base import BaseTool
+from polycode.safe_edit import reset_snapshot_session
 
 
 SYSTEM_PROMPT = """You are Polycode, a highly capable AI coding assistant.
@@ -65,6 +66,7 @@ class Agent:
         """
         self.state.history.append(Message(role="user", content=user_message))
         self.state.tool_calls_made = 0
+        reset_snapshot_session()  # each turn gets its own snapshot group
 
         while True:
             if self.state.tool_calls_made >= self.state.max_tool_calls:

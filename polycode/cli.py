@@ -28,6 +28,7 @@ from rich import print as rprint
 from polycode.agent import Agent
 from polycode.providers import get_provider
 from polycode.tools import build_tools
+from polycode.safe_edit import undo_latest, pending_paths, clear_staging
 
 load_dotenv()
 
@@ -81,7 +82,8 @@ def on_tool_end(name: str, result: str, success: bool):
     console.print(f"[{color}]{icon}[/] [dim]{preview}[/]")
 
 
-def run_repl(agent: Agent, provider_name: str, model: str):
+def run_repl(agent: Agent, provider_name: str, model: str, cwd: Path = None):
+    cwd = cwd or Path.cwd()
     color = PROVIDER_COLORS.get(provider_name.lower(), "white")
     session: PromptSession = PromptSession(history=FileHistory(str(HISTORY_FILE)))
 
@@ -110,6 +112,8 @@ def run_repl(agent: Agent, provider_name: str, model: str):
                     "[bold]/help[/]  — show this message\n"
                     "[bold]/clear[/] — clear conversation history\n"
                     "[bold]/cwd[/]   — show working directory\n"
+                    "[bold]/undo[/]  — restore files from last snapshot\n"
+                    "[bold]/stage[/] — list currently staged edits\n"
                     "[bold]/quit[/]  — exit",
                     title="Commands",
                     border_style="dim",
@@ -119,6 +123,24 @@ def run_repl(agent: Agent, provider_name: str, model: str):
                 console.print("[dim]History cleared.[/]")
             elif cmd == "cwd":
                 console.print(f"[cyan]{Path.cwd()}[/]")
+            elif cmd == "undo":
+                restored = undo_latest(cwd)
+                if restored is None:
+                    console.print("[yellow]No snapshots found — nothing to undo.[/]")
+                elif not restored:
+                    console.print("[yellow]Snapshot was empty.[/]")
+                else:
+                    for r in restored:
+                        console.print(f"[green]Restored:[/] {r}")
+                    console.print(f"[dim]Undo complete. {len(restored)} file(s) restored.[/]")
+            elif cmd == "stage":
+                paths = pending_paths(cwd)
+                if not paths:
+                    console.print("[dim]Nothing staged.[/]")
+                else:
+                    console.print("[bold]Staged files:[/]")
+                    for p in paths:
+                        console.print(f"  [cyan]{p}[/]")
             else:
                 console.print(f"[red]Unknown command: {user_input}[/]")
             continue
@@ -159,6 +181,11 @@ def main():
         help="Disable the Docker shell tool",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show diffs but apply nothing (safe preview mode)",
+    )
+    parser.add_argument(
         "--cwd",
         default=".",
         help="Working directory for file operations (default: current dir)",
@@ -184,6 +211,7 @@ def main():
         cwd=cwd,
         confirm_callback=confirm_edit,
         enable_shell=not args.no_shell,
+        dry_run=args.dry_run,
     )
 
     agent = Agent(
@@ -194,7 +222,7 @@ def main():
         on_tool_end=on_tool_end,
     )
 
-    run_repl(agent, provider_name=args.provider, model=provider.model)
+    run_repl(agent, provider_name=args.provider, model=provider.model, cwd=cwd)
 
 
 if __name__ == "__main__":
