@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
 
-from polycode.providers.base import BaseProvider, Message, ToolDefinition
+from polycode.providers.base import BaseProvider, Message, ToolDefinition, ToolCall
 from polycode.tools.base import BaseTool
 from polycode.safe_edit import reset_snapshot_session
 
@@ -79,13 +79,17 @@ class Agent:
                 system=SYSTEM_PROMPT,
             )
 
+            if response is None:
+                yield "[Provider returned empty response. Stopping.]"
+                break
+
             self.state.history.append(response)
 
             # Yield any text content
             if response.content:
                 yield response.content
 
-            # No tool calls → we're done
+            # No tool calls and no content → provider returned empty, stop safely
             if not response.tool_calls:
                 break
 
