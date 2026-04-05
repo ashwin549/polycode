@@ -169,6 +169,13 @@ polycode
 ## Shell isolation
 
 The shell tool requires Docker.
+Install Docker Desktop and run it. 
+Make sure the image is pulled by running (you only need to do this once):
+
+```bash
+docker pull python:3.12-slim
+```
+
 
 Commands run inside a `python:3.12-slim` container with:
 
